@@ -1,0 +1,36 @@
+{
+    "kindle_oasis_3": {
+        "name": "Kindle Oasis 3",
+        "target_folder": "documents",
+        "preferred_format": ".azw3",
+        "direct_formats": [
+            ".azw3",
+            ".azw",
+            ".mobi",
+            ".prc",
+            ".txt",
+            ".pdf"
+        ],
+        "convert_formats": {
+            ".epub": ".azw3",
+            ".docx": ".azw3",
+            ".html": ".azw3",
+            ".htm": ".azw3",
+            ".rtf": ".azw3"
+        }
+    },
+    "generic_kindle": {
+        "name": "Generic Kindle",
+        "target_folder": "documents",
+        "preferred_format": ".azw3",
+        "direct_formats": [
+            ".azw3",
+            ".mobi",
+            ".pdf",
+            ".txt"
+        ],
+        "convert_formats": {
+            ".epub": ".azw3"
+        }
+    }
+}
