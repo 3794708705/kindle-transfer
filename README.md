@@ -132,6 +132,21 @@ KindleTransfer.bat test    # 直接跑测试
 python main.py
 ```
 
+## 使用流程
+
+1. 连接 Kindle —— 程序自动识别设备并选好目标目录。
+2. 点「选择电子书」，或直接把文件拖进列表。
+3. 需要去掉某些文件时：
+   - 点「移除选中」按钮
+   - 或在列表里右键 → 「移除选中」/「清空列表」
+   - 或选中后按 `Delete` 键
+   - 支持 `Ctrl` / `Shift` 多选，可一次移除多行
+4. 点「智能传送」。
+
+> **列表的「移除」只针对待传列表**，表示「这个不传了」。磁盘上的原文件**不会被删除**，随时可以重新添加。
+>
+> 传送进行中列表会被锁定，避免行号错位——等传送结束再修改。
+
 ## 运行测试
 
 ```bash
@@ -140,7 +155,7 @@ pytest
 python -m pytest tests/ -q
 ```
 
-当前：**149 passed, 1 skipped, 0 failed**。
+当前：**173 passed, 1 skipped, 0 failed**。
 
 跳过的那 1 项是需要真实 Kindle 连接的集成测试。
 
@@ -204,6 +219,7 @@ KindleTransfer/
 └── tests/
     ├── test_device_detection.py       # 评分与识别
     ├── test_device_manager_polling.py # 多设备/断开/指纹 安全规则
+    ├── test_file_list_management.py   # 列表移除/清空（含"不删原文件"保证）
     ├── test_profiles.py
     ├── test_analyzer.py
     ├── test_transfer.py

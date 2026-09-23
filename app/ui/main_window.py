@@ -14,7 +14,13 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal, Slot, QSettings
-from PySide6.QtGui import QDragEnterEvent, QDropEvent, QAction
+from PySide6.QtGui import (
+    QAction,
+    QDragEnterEvent,
+    QDropEvent,
+    QKeySequence,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -25,6 +31,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QMainWindow,
+    QMenu,
     QMenuBar,
     QMessageBox,
     QPushButton,
@@ -458,6 +465,23 @@ class MainWindow(QMainWindow):
         file_layout.addWidget(self._select_books_btn)
 
         file_layout.addStretch()
+
+        # List management. These edit the pending list only — the source
+        # files on disk are never touched.
+        self._remove_selected_btn = QPushButton("移除选中")
+        self._remove_selected_btn.setToolTip(
+            "从列表中移除选中的文件（不会删除磁盘上的原文件）"
+        )
+        self._remove_selected_btn.clicked.connect(self._on_remove_selected)
+        file_layout.addWidget(self._remove_selected_btn)
+
+        self._clear_list_btn = QPushButton("清空列表")
+        self._clear_list_btn.setToolTip(
+            "清空整个待传列表（不会删除磁盘上的原文件）"
+        )
+        self._clear_list_btn.clicked.connect(self._on_clear_list)
+        file_layout.addWidget(self._clear_list_btn)
+
         main_layout.addLayout(file_layout)
 
         # ── File List Table ──
@@ -481,6 +505,23 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(COL_ACTION, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(COL_TARGET, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(COL_STATUS, QHeaderView.ResizeMode.ResizeToContents)
+
+        # Multi-row selection (Ctrl/Shift click) so several entries can be
+        # removed at once.
+        self._table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
+
+        # Right-click menu for list management.
+        self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._on_table_context_menu)
+
+        # Delete key removes the selected rows while the table has focus.
+        # WidgetShortcut keeps it scoped to the table, so it cannot fire
+        # while the user is typing elsewhere in the window.
+        self._delete_shortcut = QShortcut(
+            QKeySequence(Qt.Key.Key_Delete), self._table
+        )
+        self._delete_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+        self._delete_shortcut.activated.connect(self._on_remove_selected)
 
         main_layout.addWidget(self._table)
 
@@ -563,6 +604,8 @@ class MainWindow(QMainWindow):
         self._transfer_btn.setEnabled(False)
         self._select_kindle_btn.setEnabled(False)
         self._select_books_btn.setEnabled(False)
+        self._remove_selected_btn.setEnabled(False)
+        self._clear_list_btn.setEnabled(False)
 
     # ── Drag & Drop ──
 
@@ -622,6 +665,115 @@ class MainWindow(QMainWindow):
         self._analyses.extend(new_analyses)
         self._refresh_table()
         self._status_bar.showMessage(f"已添加 {len(new_analyses)} 个文件")
+
+    def _is_transferring(self) -> bool:
+        """True while a transfer worker is running.
+
+        The worker is handed the analysis list and echoes row indices back
+        through progress_signal, so the list must not change mid-transfer.
+        """
+        return self._worker is not None
+
+    def _selected_rows(self) -> list[int]:
+        """Return the selected row indices, ascending and de-duplicated."""
+        return sorted({index.row() for index in self._table.selectedIndexes()})
+
+    def _on_remove_selected(self) -> None:
+        """Remove the selected entries from the pending list.
+
+        Only the in-memory list is edited. The source files on disk are
+        deliberately left untouched — removing an entry here means
+        "do not transfer this", not "delete this file".
+        """
+        if self._is_transferring():
+            QMessageBox.information(
+                self, "提示", "正在传送中，请等待完成后再修改列表。"
+            )
+            return
+
+        rows = self._selected_rows()
+        if not rows:
+            QMessageBox.information(self, "提示", "请先在列表中选择要移除的文件。")
+            return
+
+        # Remove from the end so the earlier indices stay valid.
+        for row in reversed(rows):
+            if 0 <= row < len(self._analyses):
+                del self._analyses[row]
+
+        self._refresh_table()
+        self._status_bar.showMessage(
+            f"已从列表移除 {len(rows)} 个文件（磁盘上的原文件未删除）"
+        )
+
+    def _on_clear_list(self) -> None:
+        """Clear the whole pending list.
+
+        As with removal, the source files on disk are never touched.
+        """
+        if self._is_transferring():
+            QMessageBox.information(
+                self, "提示", "正在传送中，请等待完成后再修改列表。"
+            )
+            return
+
+        if not self._analyses:
+            QMessageBox.information(self, "提示", "列表已经是空的。")
+            return
+
+        count = len(self._analyses)
+        reply = QMessageBox.question(
+            self,
+            "清空列表",
+            f"确定要清空列表中的 {count} 个文件吗？\n\n"
+            "注意：只会清空这个待传列表，磁盘上的原文件不会被删除。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        self._analyses.clear()
+        self._refresh_table()
+        self._status_bar.showMessage(
+            f"已清空列表（{count} 个文件，磁盘上的原文件未删除）"
+        )
+
+    def _build_list_menu(self) -> QMenu:
+        """Build the file-list right-click menu.
+
+        Kept separate from _on_table_context_menu so the menu can be
+        inspected without entering a modal event loop.
+        """
+        menu = QMenu(self._table)
+
+        remove_action = menu.addAction("移除选中")
+        remove_action.setEnabled(bool(self._table.selectedIndexes()))
+        remove_action.triggered.connect(self._on_remove_selected)
+
+        clear_action = menu.addAction("清空列表")
+        clear_action.setEnabled(self._table.rowCount() > 0)
+        clear_action.triggered.connect(self._on_clear_list)
+
+        menu.addSeparator()
+        hint = menu.addAction("仅从列表移除，不删除磁盘上的原文件")
+        hint.setEnabled(False)
+
+        return menu
+
+    def _on_table_context_menu(self, pos) -> None:
+        """Show the right-click menu for the file list."""
+        if self._is_transferring():
+            return
+
+        index = self._table.indexAt(pos)
+        if index.isValid():
+            # Right-clicking a row outside the current selection should act
+            # on that row instead of the previous selection.
+            if not self._table.selectionModel().isSelected(index):
+                self._table.selectRow(index.row())
+
+        self._build_list_menu().exec(self._table.viewport().mapToGlobal(pos))
 
     def _refresh_table(self) -> None:
         """Rebuild the table from self._analyses."""
@@ -920,6 +1072,9 @@ class MainWindow(QMainWindow):
         self._transfer_btn.setEnabled(False)
         self._select_kindle_btn.setEnabled(False)
         self._select_books_btn.setEnabled(False)
+        # Row indices are in flight during a transfer, so the list is frozen.
+        self._remove_selected_btn.setEnabled(False)
+        self._clear_list_btn.setEnabled(False)
 
         self._worker = TransferWorker(
             self._analyses,
@@ -970,6 +1125,9 @@ class MainWindow(QMainWindow):
         self._transfer_btn.setEnabled(True)
         self._select_kindle_btn.setEnabled(True)
         self._select_books_btn.setEnabled(True)
+        # Transfer is over, so the list can be edited again.
+        self._remove_selected_btn.setEnabled(True)
+        self._clear_list_btn.setEnabled(True)
 
         success_count = 0
         fail_count = 0
