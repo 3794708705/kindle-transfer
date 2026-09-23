@@ -1,7 +1,4 @@
-"""KindleTransfer - Kindle Smart Book Transfer Assistant.
-
-V0.1: Supports Kindle Oasis 3 with manual directory selection.
-"""
+"""KindleTransfer - Kindle Smart Book Transfer Assistant."""
 
 from __future__ import annotations
 
@@ -12,6 +9,8 @@ from pathlib import Path
 from PySide6.QtWidgets import QApplication
 
 from app.ui.main_window import MainWindow
+
+APP_VERSION = "0.2.2"
 
 
 def setup_logging() -> None:
@@ -46,7 +45,7 @@ def setup_logging() -> None:
     logger.addHandler(console_handler)
 
     logger.info("=" * 50)
-    logger.info("KindleTransfer V0.1 starting")
+    logger.info("KindleTransfer V%s starting", APP_VERSION)
     logger.info("=" * 50)
 
 

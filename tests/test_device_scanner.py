@@ -311,3 +311,159 @@ class TestShutdown:
         worker.start()
         assert worker.stop(timeout_ms=3000) is True
         assert worker.isFinished()
+
+    def test_clean_stop_does_not_park_the_worker(
+        self, scanner_module, monkeypatch
+    ):
+        """Parking is for stuck threads only — it must not become routine."""
+        _no_devices(monkeypatch, scanner_module)
+
+        before = len(scanner_module._PARKED_WORKERS)
+        worker = scanner_module.DeviceScanWorker(interval_ms=50)
+        worker.start()
+        assert worker.stop(timeout_ms=3000) is True
+        assert len(scanner_module._PARKED_WORKERS) == before
+
+
+# ── Stability ────────────────────────────────────────────────────────────────
+
+
+class TestStability:
+    def test_repeated_start_stop_does_not_leak_threads(
+        self, scanner_module, monkeypatch
+    ):
+        """Long-running use means many start/stop cycles; none may leak."""
+        from app.devices.device_manager import DeviceManager
+
+        _no_devices(monkeypatch, scanner_module)
+
+        baseline = threading.active_count()
+
+        for _ in range(15):
+            manager = DeviceManager()
+            manager.start()
+            manager.stop()
+            assert manager._scanner is None
+
+        # Allow one for thread teardown scheduling slack.
+        assert threading.active_count() <= baseline + 1, (
+            "threads leaked: "
+            f"{baseline} -> {threading.active_count()}"
+        )
+
+    def test_manager_restart_is_clean(self, scanner_module, monkeypatch):
+        """start() must be re-entrant after stop()."""
+        from app.devices.device_manager import DeviceManager
+
+        _no_devices(monkeypatch, scanner_module)
+
+        manager = DeviceManager()
+        manager.start()
+        manager.stop()
+        manager.start()
+        try:
+            assert manager._scanner is not None
+            assert manager._scanner.isRunning()
+        finally:
+            manager.stop()
+
+    def test_double_stop_is_safe(self, scanner_module, monkeypatch):
+        from app.devices.device_manager import DeviceManager
+
+        _no_devices(monkeypatch, scanner_module)
+
+        manager = DeviceManager()
+        manager.start()
+        manager.stop()
+        manager.stop()  # must not raise
+
+
+# ── Log noise ────────────────────────────────────────────────────────────────
+
+
+class TestLogNoise:
+    def test_volume_log_fires_only_when_the_set_changes(self):
+        """Regression: per-scan volume logging produced ~130k lines/day."""
+        import logging
+        from pathlib import Path
+
+        from app.devices import windows_detector as wd
+
+        volume = wd.WindowsVolume(
+            drive_letter="E",
+            root_path=Path("E:/"),
+            volume_label="Kindle",
+            filesystem="FAT32",
+            drive_type=2,
+            serial_number="ABC123",
+            total_bytes=1,
+            free_bytes=1,
+        )
+
+        wd._last_logged_volumes = None
+        records = []
+
+        class Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        handler = Capture()
+        target = logging.getLogger("app.devices.windows_detector")
+        target.addHandler(handler)
+        previous_level = target.level
+        target.setLevel(logging.INFO)
+        try:
+            # Simulate 20 consecutive polls with an unchanged volume set.
+            for _ in range(20):
+                wd._log_volume_changes([volume])
+        finally:
+            target.removeHandler(handler)
+            target.setLevel(previous_level)
+            wd._last_logged_volumes = None
+
+        assert len(records) == 1, (
+            f"expected 1 log line for 20 identical scans, got {len(records)}"
+        )
+
+    def test_volume_log_fires_again_after_a_change(self):
+        from pathlib import Path
+
+        from app.devices import windows_detector as wd
+
+        def vol(letter, label):
+            return wd.WindowsVolume(
+                drive_letter=letter,
+                root_path=Path(f"{letter}:/"),
+                volume_label=label,
+                filesystem="FAT32",
+                drive_type=2,
+                serial_number="X",
+                total_bytes=1,
+                free_bytes=1,
+            )
+
+        wd._last_logged_volumes = None
+        records = []
+
+        import logging
+
+        class Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        handler = Capture()
+        target = logging.getLogger("app.devices.windows_detector")
+        target.addHandler(handler)
+        previous_level = target.level
+        target.setLevel(logging.INFO)
+        try:
+            wd._log_volume_changes([vol("E", "Kindle")])
+            wd._log_volume_changes([vol("E", "Kindle")])
+            wd._log_volume_changes([vol("E", "Kindle"), vol("F", "USB")])
+            wd._log_volume_changes([])
+        finally:
+            target.removeHandler(handler)
+            target.setLevel(previous_level)
+            wd._last_logged_volumes = None
+
+        assert len(records) == 3

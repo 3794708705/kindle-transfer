@@ -127,9 +127,37 @@ def enumerate_volumes() -> list[WindowsVolume]:
             free_bytes=free,
         )
         volumes.append(volume)
-        logger.debug("Found volume: %s", volume)
 
+    _log_volume_changes(volumes)
     return volumes
+
+
+# The scan runs every couple of seconds.  Logging every volume on every scan
+# produced roughly 130k lines a day, which buried real events and made the log
+# useless for diagnosing a freeze.  Report only when the volume set changes.
+_last_logged_volumes: tuple[tuple[str, str], ...] | None = None
+
+
+def _log_volume_changes(volumes: list[WindowsVolume]) -> None:
+    """Log the connected volume set, but only when it actually changes."""
+    global _last_logged_volumes
+
+    signature = tuple((v.drive_letter, v.volume_label or "") for v in volumes)
+    if signature == _last_logged_volumes:
+        return
+    _last_logged_volumes = signature
+
+    if not volumes:
+        logger.info("Volumes: (none)")
+        return
+
+    logger.info(
+        "Volumes: %s",
+        ", ".join(
+            f"{v.drive_letter}: [{v.volume_label or 'no label'} / {v.filesystem}]"
+            for v in volumes
+        ),
+    )
 
 
 def get_volume_by_drive(drive_letter: str) -> WindowsVolume | None:
