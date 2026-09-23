@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QObject, Signal
 
 from app.devices.windows_detector import enumerate_volumes, get_volume_by_drive
 from app.devices.device_matcher import (
@@ -20,6 +20,7 @@ from app.devices.device_matcher import (
     save_device_profile,
 )
 from app.devices.profiles import DeviceProfile
+from app.devices.device_scanner import DeviceScanWorker
 
 logger = logging.getLogger(__name__)
 
@@ -64,20 +65,44 @@ class DeviceManager(QObject):
         # Blocks auto-selection until the user explicitly re-chooses, so a
         # stale selection can never become a write target for another device.
         self._awaiting_user_selection: bool = False
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._poll)
-        self._timer.setInterval(2000)  # 2 seconds
+        # Scanning runs on its own thread.  See app/devices/device_scanner.py
+        # for why the blocking scan must never run on the GUI thread.
+        self._scanner: DeviceScanWorker | None = None
+        self._stopping: bool = False
 
     def start(self) -> None:
-        """Start polling for devices."""
+        """Start scanning for devices."""
         logger.info("DeviceManager started")
-        self._poll()
-        self._timer.start()
+        self._stopping = False
+        self._scanner = DeviceScanWorker()
+        self._scanner.scan_completed.connect(self._on_scan_completed)
+        self._scanner.scan_failed.connect(self._on_scan_failed)
+        self._scanner.start()
+        # Deliberately no synchronous first scan: that would put blocking
+        # device I/O back on the GUI thread and could freeze startup.
 
     def stop(self) -> None:
-        """Stop polling."""
-        self._timer.stop()
+        """Stop scanning."""
+        self._stopping = True
+        if self._scanner is not None:
+            self._scanner.stop()
+            self._scanner = None
         logger.info("DeviceManager stopped")
+
+    # ── Scan results ────────────────────────────────────────────────────────
+
+    def _on_scan_completed(self, candidates: list[DetectionResult]) -> None:
+        """Receive a finished scan from the worker thread.
+
+        Runs on the GUI thread (Qt queues the signal), so the policy below is
+        never executed concurrently with the GUI's own calls into this object.
+        """
+        if self._stopping:
+            return
+        self._apply(candidates)
+
+    def _on_scan_failed(self, message: str) -> None:
+        logger.error("Device scan reported a failure: %s", message)
 
     # ── Properties ──────────────────────────────────────────────────────────
 
@@ -204,15 +229,31 @@ class DeviceManager(QObject):
 
     # ── Polling ─────────────────────────────────────────────────────────────
 
+    def _scan(self) -> list[DetectionResult]:
+        """Perform one blocking device scan.
+
+        This reads the *device* filesystem (folder probes), so in production
+        it only ever runs on DeviceScanWorker's thread.
+        """
+        volumes = enumerate_volumes()
+        return detect_all_kindle_devices(volumes)
+
     def _poll(self) -> None:
-        """Poll for connected devices.  Implements multi-device policy."""
+        """Synchronous scan + apply.
+
+        Production polling goes through DeviceScanWorker.  This entry point
+        exists so a single cycle can be driven deterministically — the test
+        suite uses it throughout.
+        """
         try:
-            volumes = enumerate_volumes()
-            all_candidates = detect_all_kindle_devices(volumes)
+            all_candidates = self._scan()
         except Exception:
             logger.exception("Device polling failed")
             return
+        self._apply(all_candidates)
 
+    def _apply(self, all_candidates: list[DetectionResult]) -> None:
+        """Run the multi-device selection policy against a fresh scan."""
         prev_current = self._current_device
         self._all_devices = all_candidates
         signature = self._signature(all_candidates)

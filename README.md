@@ -32,7 +32,18 @@
 
 ### 热插拔
 
-`DeviceManager` 每 2 秒轮询一次卷列表（仅读取 Win32 卷信息，开销极低）。插入或拔出后界面会自动更新。
+`DeviceManager` 每 2 秒扫描一次设备，插入或拔出后界面自动更新。
+
+扫描**运行在独立线程上**（`app/devices/device_scanner.py`），不在界面线程。
+
+这一点很重要：扫描不只是读 Win32 卷信息，它还要探测设备上的 `documents` 和 Kindle 特征目录，**是对 Kindle 本体的文件系统调用**。USB 连接一旦卡住，这类调用会长时间阻塞且无法超时。如果跑在界面线程上，一次阻塞就足以让整个窗口冻结，直到 Windows 判定程序无响应（Application Hang / AppHangB1），用户连关都关不掉。
+
+放到独立线程后：
+
+- 即使设备完全无响应，窗口仍能正常重绘和关闭
+- 界面线程只接收扫描完成的候选列表，所有选择策略状态仍是单线程的
+
+停止时**不使用 `QThread.terminate()`**（它无法中断阻塞中的系统调用）。若线程卡在设备 I/O 中停不下来，会被"停放"而不是强杀——进程照常退出，由系统回收该线程。
 
 ## 多设备安全规则（V0.2.1）
 
@@ -155,7 +166,7 @@ pytest
 python -m pytest tests/ -q
 ```
 
-当前：**173 passed, 1 skipped, 0 failed**。
+当前：**182 passed, 1 skipped, 0 failed**。
 
 跳过的那 1 项是需要真实 Kindle 连接的集成测试。
 
@@ -204,8 +215,9 @@ KindleTransfer/
 │   │   └── main_window.py         # PySide6 GUI + 传输工作线程
 │   ├── devices/
 │   │   ├── windows_detector.py    # Win32 卷枚举（ctypes，无额外依赖）
+│   │   ├── device_scanner.py      # 后台扫描线程（避免阻塞界面）
 │   │   ├── device_matcher.py      # 多特征评分识别 + 指纹映射持久化
-│   │   ├── device_manager.py      # 轮询、热插拔、多设备安全策略
+│   │   ├── device_manager.py      # 设备状态机、多设备安全策略
 │   │   ├── profiles.py            # 设备配置加载
 │   │   └── detector.py            # Kindle 根目录校验
 │   ├── books/
@@ -219,6 +231,7 @@ KindleTransfer/
 └── tests/
     ├── test_device_detection.py       # 评分与识别
     ├── test_device_manager_polling.py # 多设备/断开/指纹 安全规则
+    ├── test_device_scanner.py         # 后台扫描线程（含界面不冻结回归测试）
     ├── test_file_list_management.py   # 列表移除/清空（含"不删原文件"保证）
     ├── test_profiles.py
     ├── test_analyzer.py
